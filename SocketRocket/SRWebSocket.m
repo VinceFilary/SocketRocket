@@ -183,12 +183,6 @@ typedef void (^data_callback)(SRWebSocket *webSocket,  NSData *data);
 @property (nonatomic) NSOperationQueue *delegateOperationQueue;
 @property (nonatomic) dispatch_queue_t delegateDispatchQueue;
 
-// Specifies whether SSL trust chain should NOT be evaluated.
-// By default this flag is set to NO, meaning only secure SSL connections are allowed.
-// For DEBUG builds this flag is ignored, and SSL connections are allowed regardless
-// of the certificate trust configuration
-@property (nonatomic, readwrite) BOOL allowsUntrustedSSLCertificates;
-
 @end
 
 
@@ -219,7 +213,6 @@ typedef void (^data_callback)(SRWebSocket *webSocket,  NSData *data);
     NSString *_closeReason;
     
     NSString *_secKey;
-    NSString *_basicAuthorizationString;
     
     BOOL _pinnedCertFound;
     
@@ -234,6 +227,8 @@ typedef void (^data_callback)(SRWebSocket *webSocket,  NSData *data);
     BOOL _secure;
     NSURLRequest *_urlRequest;
 
+    
+    
     BOOL _sentClose;
     BOOL _didFail;
     int _closeCode;
@@ -261,14 +256,13 @@ static __strong NSData *CRLFCRLF;
     CRLFCRLF = [[NSData alloc] initWithBytes:"\r\n\r\n" length:4];
 }
 
-- (id)initWithURLRequest:(NSURLRequest *)request protocols:(NSArray *)protocols allowsUntrustedSSLCertificates:(BOOL)allowsUntrustedSSLCertificates;
+- (id)initWithURLRequest:(NSURLRequest *)request protocols:(NSArray *)protocols;
 {
     self = [super init];
     if (self) {
         assert(request.URL);
         _url = request.URL;
         _urlRequest = request;
-        _allowsUntrustedSSLCertificates = allowsUntrustedSSLCertificates;
         
         _requestedProtocols = [protocols copy];
         
@@ -276,11 +270,6 @@ static __strong NSData *CRLFCRLF;
     }
     
     return self;
-}
-
-- (id)initWithURLRequest:(NSURLRequest *)request protocols:(NSArray *)protocols;
-{
-    return [self initWithURLRequest:request protocols:protocols allowsUntrustedSSLCertificates:NO];
 }
 
 - (id)initWithURLRequest:(NSURLRequest *)request;
@@ -299,14 +288,9 @@ static __strong NSData *CRLFCRLF;
     return [self initWithURLRequest:request protocols:protocols];
 }
 
-- (id)initWithURL:(NSURL *)url protocols:(NSArray *)protocols allowsUntrustedSSLCertificates:(BOOL)allowsUntrustedSSLCertificates;
-{
-    NSMutableURLRequest *request = [[NSMutableURLRequest alloc] initWithURL:url];
-    return [self initWithURLRequest:request protocols:protocols allowsUntrustedSSLCertificates:allowsUntrustedSSLCertificates];
-}
-
 - (void)_SR_commonInit;
 {
+    
     NSString *scheme = _url.scheme.lowercaseString;
     assert([scheme isEqualToString:@"ws"] || [scheme isEqualToString:@"http"] || [scheme isEqualToString:@"wss"] || [scheme isEqualToString:@"https"]);
     
@@ -389,16 +373,7 @@ static __strong NSData *CRLFCRLF;
     NSAssert(_readyState == SR_CONNECTING, @"Cannot call -(void)open on SRWebSocket more than once");
 
     _selfRetain = self;
-
-    if (_urlRequest.timeoutInterval > 0)
-    {
-        dispatch_time_t popTime = dispatch_time(DISPATCH_TIME_NOW, _urlRequest.timeoutInterval * NSEC_PER_SEC);
-        dispatch_after(popTime, dispatch_get_main_queue(), ^(void){
-            if (self.readyState == SR_CONNECTING)
-                [self _failWithError:[NSError errorWithDomain:@"com.squareup.SocketRocket" code:504 userInfo:@{NSLocalizedDescriptionKey: @"Timeout Connecting to Server"}]];
-        });
-    }
-
+    
     [self openConnection];
 }
 
@@ -498,7 +473,7 @@ static __strong NSData *CRLFCRLF;
     }];
 }
 
-- (void)didConnect;
+- (void)didConnect
 {
     SRFastLog(@"Connected");
     CFHTTPMessageRef request = CFHTTPMessageCreateRequest(NULL, CFSTR("GET"), (__bridge CFURLRef)_url, kCFHTTPVersion1_1);
@@ -529,22 +504,6 @@ static __strong NSData *CRLFCRLF;
         }
     }
  
-    // set header for http basic auth
-    if (_url.user.length && _url.password.length) {
-        NSData *userAndPassword = [[NSString stringWithFormat:@"%@:%@", _url.user, _url.password] dataUsingEncoding:NSUTF8StringEncoding];
-        NSString *userAndPasswordBase64Encoded;
-        if ([keyBytes respondsToSelector:@selector(base64EncodedStringWithOptions:)]) {
-            userAndPasswordBase64Encoded = [userAndPassword base64EncodedStringWithOptions:0];
-        } else {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            userAndPasswordBase64Encoded = [userAndPassword base64Encoding];
-#pragma clang diagnostic pop
-        }
-        _basicAuthorizationString = [NSString stringWithFormat:@"Basic %@", userAndPasswordBase64Encoded];
-        CFHTTPMessageSetHeaderFieldValue(request, CFSTR("Authorization"), (__bridge CFStringRef)_basicAuthorizationString);
-    }
-
     CFHTTPMessageSetHeaderFieldValue(request, CFSTR("Upgrade"), CFSTR("websocket"));
     CFHTTPMessageSetHeaderFieldValue(request, CFSTR("Connection"), CFSTR("Upgrade"));
     CFHTTPMessageSetHeaderFieldValue(request, CFSTR("Sec-WebSocket-Key"), (__bridge CFStringRef)_secKey);
@@ -589,12 +548,7 @@ static __strong NSData *CRLFCRLF;
     _outputStream = CFBridgingRelease(writeStream);
     _inputStream = CFBridgingRelease(readStream);
     
-    _inputStream.delegate = self;
-    _outputStream.delegate = self;
-}
-
-- (void)_updateSecureStreamOptions;
-{
+    
     if (_secure) {
         NSMutableDictionary *SSLOptions = [[NSMutableDictionary alloc] init];
         
@@ -602,17 +556,13 @@ static __strong NSData *CRLFCRLF;
         
         // If we're using pinned certs, don't validate the certificate chain
         if ([_urlRequest SR_SSLPinnedCertificates].count) {
-            [SSLOptions setValue:@NO forKey:(__bridge id)kCFStreamSSLValidatesCertificateChain];
+            [SSLOptions setValue:[NSNumber numberWithBool:NO] forKey:(__bridge id)kCFStreamSSLValidatesCertificateChain];
         }
         
 #if DEBUG
-        self.allowsUntrustedSSLCertificates = YES;
+        [SSLOptions setValue:[NSNumber numberWithBool:NO] forKey:(__bridge id)kCFStreamSSLValidatesCertificateChain];
+        NSLog(@"SocketRocket: In debug mode.  Allowing connection to any root cert");
 #endif
-
-        if (self.allowsUntrustedSSLCertificates) {
-            [SSLOptions setValue:@NO forKey:(__bridge id)kCFStreamSSLValidatesCertificateChain];
-            SRFastLog(@"Allowing connection to any root cert");
-        }
         
         [_outputStream setProperty:SSLOptions
                             forKey:(__bridge id)kCFStreamPropertySSLSettings];
@@ -620,49 +570,10 @@ static __strong NSData *CRLFCRLF;
     
     _inputStream.delegate = self;
     _outputStream.delegate = self;
-    
-    [self setupNetworkServiceType:_urlRequest.networkServiceType];
-}
-
-- (void)setupNetworkServiceType:(NSURLRequestNetworkServiceType)requestNetworkServiceType
-{
-    NSString *networkServiceType;
-    switch (requestNetworkServiceType) {
-        case NSURLNetworkServiceTypeDefault:
-            break;
-        case NSURLNetworkServiceTypeVoIP: {
-            networkServiceType = NSStreamNetworkServiceTypeVoIP;
-#if TARGET_OS_IPHONE && __IPHONE_9_0
-            if (floor(NSFoundationVersionNumber) > NSFoundationVersionNumber_iOS_8_3) {
-                static dispatch_once_t predicate;
-                dispatch_once(&predicate, ^{
-                    NSLog(@"SocketRocket: %@ - this service type is deprecated in favor of using PushKit for VoIP control", networkServiceType);
-                });
-            }
-#endif
-            break;
-        }
-        case NSURLNetworkServiceTypeVideo:
-            networkServiceType = NSStreamNetworkServiceTypeVideo;
-            break;
-        case NSURLNetworkServiceTypeBackground:
-            networkServiceType = NSStreamNetworkServiceTypeBackground;
-            break;
-        case NSURLNetworkServiceTypeVoice:
-            networkServiceType = NSStreamNetworkServiceTypeVoice;
-            break;
-    }
-    
-    if (networkServiceType != nil) {
-        [_inputStream setProperty:networkServiceType forKey:NSStreamNetworkServiceType];
-        [_outputStream setProperty:networkServiceType forKey:NSStreamNetworkServiceType];
-    }
 }
 
 - (void)openConnection;
 {
-    [self _updateSecureStreamOptions];
-    
     if (!_scheduledRunloops.count) {
         [self scheduleInRunLoop:[NSRunLoop SR_networkRunLoop] forMode:NSDefaultRunLoopMode];
     }
@@ -970,7 +881,7 @@ static inline BOOL closeCodeIsValid(int closeCode) {
 {
     assert(frame_header.opcode != 0);
     
-    if (self.readyState == SR_CLOSED) {
+    if (self.readyState != SR_OPEN) {
         return;
     }
     
@@ -1256,7 +1167,7 @@ static const char CRLFCRLFBytes[] = {'\r', '\n', '\r', '\n'};
     
     BOOL didWork = NO;
     
-    if (self.readyState >= SR_CLOSED) {
+    if (self.readyState >= SR_CLOSING) {
         return didWork;
     }
     
@@ -1487,10 +1398,6 @@ static const size_t SRFrameHeaderOverhead = 32;
                     [self _failWithError:[NSError errorWithDomain:SRWebSocketErrorDomain code:23556 userInfo:[NSDictionary dictionaryWithObject:[NSString stringWithFormat:@"Invalid server cert"] forKey:NSLocalizedDescriptionKey]]];
                 });
                 return;
-            } else if (aStream == _outputStream) {
-                dispatch_async(_workQueue, ^{
-                    [self didConnect];
-                });
             }
         }
     }
@@ -1504,9 +1411,7 @@ static const size_t SRFrameHeaderOverhead = 32;
                 }
                 assert(_readBuffer);
                 
-                // didConnect fires after certificate verification if we're using pinned certificates.
-                BOOL usingPinnedCerts = [[_urlRequest SR_SSLPinnedCertificates] count] > 0;
-                if ((!_secure || !usingPinnedCerts) && self.readyState == SR_CONNECTING && aStream == _inputStream) {
+                if (self.readyState == SR_CONNECTING && aStream == _inputStream) {
                     [self didConnect];
                 }
                 [self _pumpWriting];
@@ -1530,22 +1435,20 @@ static const size_t SRFrameHeaderOverhead = 32;
                 if (aStream.streamError) {
                     [self _failWithError:aStream.streamError];
                 } else {
-                    dispatch_async(_workQueue, ^{
-                        if (self.readyState != SR_CLOSED) {
-                            self.readyState = SR_CLOSED;
-                            _selfRetain = nil;
-                        }
+                    if (self.readyState != SR_CLOSED) {
+                        self.readyState = SR_CLOSED;
+                        _selfRetain = nil;
+                    }
 
-                        if (!_sentClose && !_failed) {
-                            _sentClose = YES;
-                            // If we get closed in this state it's probably not clean because we should be sending this when we send messages
-                            [self _performDelegateBlock:^{
-                                if ([self.delegate respondsToSelector:@selector(webSocket:didCloseWithCode:reason:wasClean:)]) {
-                                    [self.delegate webSocket:self didCloseWithCode:SRStatusCodeGoingAway reason:@"Stream end encountered" wasClean:NO];
-                                }
-                            }];
-                        }
-                    });
+                    if (!_sentClose && !_failed) {
+                        _sentClose = YES;
+                        // If we get closed in this state it's probably not clean because we should be sending this when we send messages
+                        [self _performDelegateBlock:^{
+                            if ([self.delegate respondsToSelector:@selector(webSocket:didCloseWithCode:reason:wasClean:)]) {
+                                [self.delegate webSocket:self didCloseWithCode:SRStatusCodeGoingAway reason:@"Stream end encountered" wasClean:NO];
+                            }
+                        }];
+                    }
                 }
                 
                 break;
@@ -1656,7 +1559,7 @@ static const size_t SRFrameHeaderOverhead = 32;
 @end
 
 
-@implementation  NSURLRequest (SRCertificateAdditions)
+@implementation  NSURLRequest (CertificateAdditions)
 
 - (NSArray *)SR_SSLPinnedCertificates;
 {
@@ -1665,7 +1568,7 @@ static const size_t SRFrameHeaderOverhead = 32;
 
 @end
 
-@implementation  NSMutableURLRequest (SRCertificateAdditions)
+@implementation  NSMutableURLRequest (CertificateAdditions)
 
 - (NSArray *)SR_SSLPinnedCertificates;
 {
@@ -1691,14 +1594,10 @@ static const size_t SRFrameHeaderOverhead = 32;
         scheme = @"http";
     }
     
-    BOOL portIsDefault = !self.port ||
-                         ([scheme isEqualToString:@"http"] && self.port.integerValue == 80) ||
-                         ([scheme isEqualToString:@"https"] && self.port.integerValue == 443);
-    
-    if (!portIsDefault) {
-        return [NSString stringWithFormat:@"%@://%@:%@", scheme, self.host, self.port];
+    if (self.port) {
+        return [NSString stringWithFormat:@"%@://%@:%@/", scheme, self.host, self.port];
     } else {
-        return [NSString stringWithFormat:@"%@://%@", scheme, self.host];
+        return [NSString stringWithFormat:@"%@://%@/", scheme, self.host];
     }
 }
 
